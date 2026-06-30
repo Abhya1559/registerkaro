@@ -1,8 +1,8 @@
 import { Router } from "express";
 
 import {
-  createJob,
   getAllJobs,
+  createJob,
   getJob,
 } from "../controller/checkDetails.controllers";
 

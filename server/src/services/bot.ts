@@ -1,13 +1,14 @@
-import { chromium } from "playwright";
 import { emitEvent } from "./event.js";
 import { updateJob } from "./jobs.services.js";
+import { chromium } from "playwright-extra";
+import stealthPlugin from "puppeteer-extra-plugin-stealth";
+import jobsModel from "../models/jobs.model.js";
 
-export async function startBot(jobId: string, pan: string) {
+export async function startBot(jobId: string, pan: string, requestId: any) {
   let browser;
   let sequence = 1;
 
   try {
-    // Job Started
     await updateJob(jobId, {
       phase: "OPEN_BROWSER",
       status: "RUNNING",
@@ -22,6 +23,7 @@ export async function startBot(jobId: string, pan: string) {
       message: "Launching Chrome browser",
     });
 
+    chromium.use(stealthPlugin());
     browser = await chromium.launch({
       channel: "chrome",
       headless: false,
@@ -42,7 +44,6 @@ export async function startBot(jobId: string, pan: string) {
 
     const page = await context.newPage();
 
-    // Open Portal
     await updateJob(jobId, {
       phase: "OPEN_PORTAL",
     });
@@ -61,12 +62,15 @@ export async function startBot(jobId: string, pan: string) {
       timeout: 60000,
     });
 
-    // Login
     await updateJob(jobId, {
       phase: "LOGIN",
     });
 
-    await page.locator('a[aria-label="Login"]').click();
+    const loginBtn = page.locator('a[aria-label="Login"]');
+    await loginBtn.waitFor({ state: "visible" });
+    await page.waitForTimeout(1000 + Math.random() * 1000);
+
+    await loginBtn.click();
 
     await emitEvent({
       jobId,
@@ -77,9 +81,7 @@ export async function startBot(jobId: string, pan: string) {
       message: "Login button clicked",
     });
 
-    await page.waitForTimeout(5000);
-
-    // Check page content
+    await page.waitForTimeout(4000);
     const pageText = await page.textContent("body");
 
     if (pageText?.includes("Permission Denied")) {
@@ -101,11 +103,84 @@ export async function startBot(jobId: string, pan: string) {
       return;
     }
 
-    // Future steps
-    // await page.fill(..., pan)
-    // await page.click(...)
-    // await waitForOTP()
-    // await generatePassword()
+    const userIdInput = page.locator('input[id="panAdhaarUserId"]');
+    await userIdInput.waitFor({ state: "visible", timeout: 15000 });
+
+    const maskedPan = pan.toUpperCase().replace(/.(?=.{4})/g, "*");
+    await emitEvent({
+      jobId,
+      sequence: sequence++,
+      level: "INFO",
+      phase: "LOGIN",
+      step: "ENTERING_PAN",
+      message: `Entering PAN: ${maskedPan}`,
+    });
+
+    await userIdInput.fill(pan.toUpperCase(), { delay: 100 });
+    await page.waitForTimeout(1000);
+
+    const continueBtn = page.locator("button.large-button-primary");
+    await continueBtn.waitFor({ state: "visible", timeout: 15000 });
+
+    const boundingBox = await continueBtn.boundingBox();
+    if (boundingBox) {
+      await page.mouse.move(
+        boundingBox.x + boundingBox.width / 2,
+        boundingBox.y + boundingBox.height / 2,
+      );
+    }
+    await page.waitForTimeout(500);
+    await continueBtn.click({ force: true });
+
+    let userPassword = "";
+    const startTime = Date.now();
+
+    while (!userPassword) {
+      if (Date.now() - startTime > 180000) {
+        throw new Error(
+          "Timeout waiting for user password from control panel.",
+        );
+      }
+
+      const currentJob = (await jobsModel.findOne({ jobId })) as any;
+      if (currentJob?.userInput?.password) {
+        userPassword = currentJob.userInput.password;
+      } else {
+        await page.waitForTimeout(3000);
+      }
+    }
+
+    await updateJob(jobId, { phase: "LOGIN" });
+
+    await emitEvent({
+      jobId,
+      sequence: sequence++,
+      level: "INFO",
+      phase: "LOGIN",
+      step: "RESUMED",
+      message: "Password received. Proceeding with authentication payload.",
+    });
+    const secureMsgCheckbox = page.locator(
+      'label:has-text("Please confirm your secure access message displayed above")',
+    );
+    await secureMsgCheckbox.waitFor({ state: "visible", timeout: 5000 });
+    await secureMsgCheckbox.dblclick({ force: true });
+
+    const passwordInput = page.locator('input[type="password"]');
+    await passwordInput.waitFor({ state: "visible", timeout: 15000 });
+
+    await page.waitForTimeout(500);
+
+    await passwordInput.fill(userPassword, { delay: 100 });
+    await page.waitForTimeout(1000);
+
+    const finalSubmitBtn = page.locator("button.large-button-primary");
+    await finalSubmitBtn.waitFor({ state: "visible", timeout: 15000 });
+    await finalSubmitBtn.click({ force: true });
+
+    const welcomeText = page.locator('text="Welcome Back"');
+    await welcomeText.waitFor({ state: "visible", timeout: 60000 });
+    await page.waitForTimeout(3000);
 
     await updateJob(jobId, {
       phase: "COMPLETED",
